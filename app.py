@@ -4,7 +4,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="Huawei Inverter Combiner",
+    page_title="Huawei Inverter Data Combiner",
     page_icon="⚡",
     layout="wide"
 )
@@ -12,8 +12,8 @@ st.set_page_config(
 st.title("⚡ Huawei Inverter Data Combiner")
 
 st.write(
-    "Upload all Huawei inverter Excel files. "
-    "The output will contain all data in one sheet, ordered TX 1 → TX 4."
+    "Upload all inverter Excel files. The app creates one row per timestamp "
+    "and one column per inverter."
 )
 
 # ---------------------------------------------------------
@@ -21,14 +21,14 @@ st.write(
 # ---------------------------------------------------------
 
 files = st.file_uploader(
-    "Upload inverter Excel files",
+    "Upload Huawei inverter Excel files",
     type=["xlsx", "xls"],
     accept_multiple_files=True
 )
 
 date_order = st.radio(
-    "Date/time order within each transformer",
-    ["Newest → Oldest", "Oldest → Newest"],
+    "Date/time order",
+    ["Oldest → Newest", "Newest → Oldest"],
     horizontal=True
 )
 
@@ -41,10 +41,8 @@ def tx_number(value):
     """
     Extract TX number from Site Name.
 
-    Examples:
+    Example:
     Rolleston TX 1 -> 1
-    Rolleston TX 2 -> 2
-    Rolleston TX 3 -> 3
     Rolleston TX 4 -> 4
     """
 
@@ -54,42 +52,41 @@ def tx_number(value):
         re.IGNORECASE
     )
 
+    return int(match.group(1)) if match else 999
+
+
+def inverter_number(value):
+    """
+    Extract inverter number for correct sorting.
+
+    Example:
+    Inverter(MBUS-22) -> 22
+    MBUS-5 -> 5
+    """
+
+    text = str(value)
+
+    match = re.search(
+        r"MBUS[-_\s]*(\d+)",
+        text,
+        re.IGNORECASE
+    )
+
     if match:
         return int(match.group(1))
 
-    return 999999
+    numbers = re.findall(r"\d+", text)
+
+    return int(numbers[-1]) if numbers else 999999
 
 
-def parse_time(value):
+def inverter_name(value):
     """
-    Convert Huawei Start Time into datetime.
-    Removes DST text if present.
-    """
+    Convert:
+    Inverter(MBUS-22)
 
-    if pd.isna(value):
-        return pd.NaT
-
-    value = str(value).strip()
-
-    value = re.sub(
-        r"\s+DST\s*$",
-        "",
-        value,
-        flags=re.IGNORECASE
-    )
-
-    return pd.to_datetime(
-        value,
-        errors="coerce"
-    )
-
-
-def get_inverter(value):
-    """
-    Extract inverter ID.
-
-    Example:
-    Inverter(MBUS-22) -> MBUS-22
+    to:
+    MBUS-22
     """
 
     text = str(value)
@@ -100,22 +97,40 @@ def get_inverter(value):
         re.IGNORECASE
     )
 
-    if match:
-        return match.group(1)
-
-    return text
+    return match.group(1) if match else text
 
 
-def read_file(file):
+def parse_time(value):
 
-    # Huawei Excel export has headings on Excel row 4
+    if pd.isna(value):
+        return pd.NaT
+
+    text = str(value).strip()
+
+    # Remove Huawei DST suffix
+    text = re.sub(
+        r"\s+DST\s*$",
+        "",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    return pd.to_datetime(
+        text,
+        errors="coerce"
+    )
+
+
+def read_huawei_file(file):
+
+    # Huawei headings are on Excel row 4
     df = pd.read_excel(
         file,
         sheet_name=0,
         header=3
     )
 
-    # Remove completely empty rows and columns
+    # Remove empty rows / columns
     df = df.dropna(
         axis=0,
         how="all"
@@ -126,74 +141,79 @@ def read_file(file):
         how="all"
     )
 
-    # Required Huawei columns
-    required_columns = [
+    required = [
         "Site Name",
         "ManageObject",
         "Start Time"
     ]
 
-    missing_columns = [
-        column
-        for column in required_columns
-        if column not in df.columns
+    missing = [
+        col for col in required
+        if col not in df.columns
     ]
 
-    if missing_columns:
+    if missing:
+
         raise ValueError(
-            "Missing column(s): "
-            + ", ".join(missing_columns)
+            "Missing columns: "
+            + ", ".join(missing)
         )
 
-    # Extract inverter name
-    df["Inverter"] = df["ManageObject"].apply(
-        get_inverter
+    # Clean timestamp
+    df["Start Time"] = (
+        df["Start Time"]
+        .apply(parse_time)
     )
 
-    # Transformer number used for sorting
-    df["_TX"] = df["Site Name"].apply(
-        tx_number
+    # Get inverter name
+    df["Inverter"] = (
+        df["ManageObject"]
+        .apply(inverter_name)
     )
 
-    # Datetime used for sorting
-    df["_TIME"] = df["Start Time"].apply(
-        parse_time
+    # Get TX number
+    df["TX"] = (
+        df["Site Name"]
+        .apply(tx_number)
     )
 
-    # Keep original filename for reference
-    df["Source File"] = file.name
+    # Inverter numerical order
+    df["INV_ORDER"] = (
+        df["Inverter"]
+        .apply(inverter_number)
+    )
 
     return df
 
 
 # ---------------------------------------------------------
-# PROCESS FILES
+# PROCESS
 # ---------------------------------------------------------
 
 if files:
 
-    st.write(
-        f"**{len(files)} files selected**"
+    st.info(
+        f"{len(files)} inverter files selected."
     )
 
     if st.button(
-        "Combine Files",
+        "Read & Combine Files",
         type="primary",
         use_container_width=True
     ):
 
-        data = []
+        all_data = []
         errors = []
 
         progress = st.progress(0)
 
-        for index, file in enumerate(files):
+        for i, file in enumerate(files):
 
             try:
 
-                df = read_file(file)
+                df = read_huawei_file(file)
 
-                data.append(df)
+                all_data.append(df)
 
             except Exception as error:
 
@@ -202,244 +222,47 @@ if files:
                 )
 
             progress.progress(
-                (index + 1) / len(files)
+                (i + 1) / len(files)
             )
 
         # -------------------------------------------------
-        # COMBINE DATA
+        # COMBINE
         # -------------------------------------------------
 
-        if data:
+        if all_data:
 
             combined = pd.concat(
-                data,
+                all_data,
                 ignore_index=True
             )
 
-            # User selected time sorting
-            time_ascending = (
-                date_order == "Oldest → Newest"
-            )
+            # ---------------------------------------------
+            # FIND AVAILABLE MEASUREMENTS
+            # ---------------------------------------------
 
-            # Sort:
-            # TX1
-            # TX2
-            # TX3
-            # TX4
-            #
-            # Then sort date/time within each TX
-
-            combined = combined.sort_values(
-                by=[
-                    "_TX",
-                    "_TIME",
-                    "Inverter"
-                ],
-                ascending=[
-                    True,
-                    time_ascending,
-                    True
-                ],
-                na_position="last"
-            )
-
-            combined = combined.reset_index(
-                drop=True
-            )
-
-            # Replace original Start Time with
-            # clean Excel datetime
-            combined["Start Time"] = combined["_TIME"]
-
-            # -------------------------------------------------
-            # COLUMN ORDER
-            # -------------------------------------------------
-
-            first_columns = [
+            exclude_columns = [
                 "Site Name",
-                "Inverter",
+                "Management Domain",
                 "ManageObject",
-                "Start Time"
+                "Start Time",
+                "Inverter",
+                "TX",
+                "INV_ORDER"
             ]
 
-            remaining_columns = [
-                column
-                for column in combined.columns
-                if column not in first_columns
-                and column not in [
-                    "_TX",
-                    "_TIME"
-                ]
+            measurement_columns = [
+                col
+                for col in combined.columns
+                if col not in exclude_columns
             ]
 
-            output_df = combined[
-                first_columns
-                + remaining_columns
-            ]
-
-            # -------------------------------------------------
-            # CREATE EXCEL FILE
-            # -------------------------------------------------
-
-            output = io.BytesIO()
-
-            with pd.ExcelWriter(
-                output,
-                engine="openpyxl"
-            ) as writer:
-
-                output_df.to_excel(
-                    writer,
-                    index=False,
-                    sheet_name="Combined Data"
-                )
-
-                worksheet = writer.book[
-                    "Combined Data"
-                ]
-
-                # Freeze top row
-                worksheet.freeze_panes = "A2"
-
-                # Enable Excel filters
-                worksheet.auto_filter.ref = (
-                    worksheet.dimensions
-                )
-
-                # Date format
-                start_time_column = (
-                    output_df.columns.get_loc(
-                        "Start Time"
-                    )
-                    + 1
-                )
-
-                for row in range(
-                    2,
-                    worksheet.max_row + 1
-                ):
-
-                    worksheet.cell(
-                        row=row,
-                        column=start_time_column
-                    ).number_format = (
-                        "dd/mm/yyyy hh:mm"
-                    )
-
-            output.seek(0)
-
-            # -------------------------------------------------
-            # RESULTS
-            # -------------------------------------------------
-
-            valid_transformers = sorted(
-                [
-                    tx
-                    for tx in combined["_TX"]
-                    .dropna()
-                    .unique()
-                    if tx != 999999
-                ]
-            )
-
-            transformer_text = ", ".join(
-                f"TX {int(tx)}"
-                for tx in valid_transformers
-            )
+            # Save data into session state
+            st.session_state["combined"] = combined
+            st.session_state["measurements"] = measurement_columns
 
             st.success(
-                f"Done! "
-                f"{len(data)} files combined | "
-                f"{len(output_df):,} rows | "
-                f"{transformer_text}"
+                f"{len(all_data)} files successfully loaded."
             )
-
-            # -------------------------------------------------
-            # SUMMARY
-            # -------------------------------------------------
-
-            st.subheader(
-                "Transformer Summary"
-            )
-
-            summary = (
-                output_df
-                .groupby("Site Name")
-                .agg(
-                    Rows=(
-                        "Site Name",
-                        "size"
-                    ),
-                    Inverters=(
-                        "Inverter",
-                        "nunique"
-                    ),
-                    First_Time=(
-                        "Start Time",
-                        "min"
-                    ),
-                    Last_Time=(
-                        "Start Time",
-                        "max"
-                    )
-                )
-                .reset_index()
-            )
-
-            summary["_TX"] = (
-                summary["Site Name"]
-                .apply(tx_number)
-            )
-
-            summary = (
-                summary
-                .sort_values("_TX")
-                .drop(
-                    columns="_TX"
-                )
-            )
-
-            st.dataframe(
-                summary,
-                use_container_width=True,
-                hide_index=True
-            )
-
-            # -------------------------------------------------
-            # PREVIEW
-            # -------------------------------------------------
-
-            st.subheader(
-                "Combined Data Preview"
-            )
-
-            st.dataframe(
-                output_df.head(100),
-                use_container_width=True,
-                hide_index=True
-            )
-
-            # -------------------------------------------------
-            # DOWNLOAD
-            # -------------------------------------------------
-
-            st.download_button(
-                label="⬇️ Download Combined Excel",
-                data=output.getvalue(),
-                file_name=(
-                    "Combined_Inverter_Data_"
-                    "TX1_to_TX4.xlsx"
-                ),
-                mime=(
-                    "application/vnd.openxmlformats-"
-                    "officedocument.spreadsheetml.sheet"
-                ),
-                use_container_width=True
-            )
-
-        # -------------------------------------------------
-        # ERRORS
-        # -------------------------------------------------
 
         if errors:
 
@@ -449,12 +272,286 @@ if files:
 
             for error in errors:
 
-                st.write(
-                    "• " + error
-                )
+                st.write("• " + error)
 
-else:
 
-    st.info(
-        "Upload your inverter Excel files to begin."
+# ---------------------------------------------------------
+# MEASUREMENT SELECTION
+# ---------------------------------------------------------
+
+if "combined" in st.session_state:
+
+    combined = st.session_state["combined"]
+
+    measurements = (
+        st.session_state["measurements"]
+    )
+
+    st.divider()
+
+    st.subheader(
+        "Select Measurement"
+    )
+
+    measurement = st.selectbox(
+        "Data to export",
+        measurements
+    )
+
+    # -----------------------------------------------------
+    # INVERTER INFORMATION
+    # -----------------------------------------------------
+
+    inverter_info = (
+        combined[
+            [
+                "Inverter",
+                "TX",
+                "INV_ORDER"
+            ]
+        ]
+        .drop_duplicates()
+        .sort_values(
+            [
+                "TX",
+                "INV_ORDER"
+            ]
+        )
+    )
+
+    inverter_list = (
+        inverter_info["Inverter"]
+        .tolist()
+    )
+
+    # -----------------------------------------------------
+    # CREATE TIME × INVERTER TABLE
+    # -----------------------------------------------------
+
+    selected = combined[
+        [
+            "Start Time",
+            "Inverter",
+            measurement
+        ]
+    ].copy()
+
+    # Convert measurement to numeric
+    selected[measurement] = (
+        pd.to_numeric(
+            selected[measurement],
+            errors="coerce"
+        )
+    )
+
+    # Pivot
+    pivot = selected.pivot_table(
+        index="Start Time",
+        columns="Inverter",
+        values=measurement,
+        aggfunc="first"
+    )
+
+    # -----------------------------------------------------
+    # ORDER INVERTERS TX1 → TX4
+    # -----------------------------------------------------
+
+    available_inverters = [
+        inv
+        for inv in inverter_list
+        if inv in pivot.columns
+    ]
+
+    pivot = pivot.reindex(
+        columns=available_inverters
+    )
+
+    # -----------------------------------------------------
+    # RENAME COLUMNS INV1 → INV40
+    # -----------------------------------------------------
+
+    rename_map = {}
+
+    for index, inverter in enumerate(
+        available_inverters,
+        start=1
+    ):
+
+        rename_map[inverter] = (
+            f"INV {index}"
+        )
+
+    pivot = pivot.rename(
+        columns=rename_map
+    )
+
+    # Start Time becomes normal column
+    pivot = pivot.reset_index()
+
+    # -----------------------------------------------------
+    # DATE SORT
+    # -----------------------------------------------------
+
+    ascending = (
+        date_order == "Oldest → Newest"
+    )
+
+    pivot = pivot.sort_values(
+        "Start Time",
+        ascending=ascending
+    )
+
+    # -----------------------------------------------------
+    # SHOW INVERTER MAPPING
+    # -----------------------------------------------------
+
+    st.subheader(
+        "Inverter Mapping"
+    )
+
+    mapping_data = []
+
+    for index, row in (
+        inverter_info
+        .reset_index(drop=True)
+        .iterrows()
+    ):
+
+        mapping_data.append(
+            {
+                "Output Column":
+                    f"INV {index + 1}",
+
+                "Actual Inverter":
+                    row["Inverter"],
+
+                "Transformer":
+                    f"TX {int(row['TX'])}"
+            }
+        )
+
+    mapping_df = pd.DataFrame(
+        mapping_data
+    )
+
+    st.dataframe(
+        mapping_df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    # -----------------------------------------------------
+    # DATA PREVIEW
+    # -----------------------------------------------------
+
+    st.subheader(
+        f"{measurement} Preview"
+    )
+
+    st.caption(
+        f"{len(pivot):,} timestamps × "
+        f"{len(available_inverters)} inverters"
+    )
+
+    st.dataframe(
+        pivot.head(100),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    # -----------------------------------------------------
+    # CREATE EXCEL
+    # -----------------------------------------------------
+
+    output = io.BytesIO()
+
+    with pd.ExcelWriter(
+        output,
+        engine="openpyxl"
+    ) as writer:
+
+        # Main data
+        pivot.to_excel(
+            writer,
+            index=False,
+            sheet_name="Inverter Data"
+        )
+
+        # Mapping
+        mapping_df.to_excel(
+            writer,
+            index=False,
+            sheet_name="Inverter Mapping"
+        )
+
+        # ---------------------------------------------
+        # FORMAT MAIN SHEET
+        # ---------------------------------------------
+
+        worksheet = writer.book[
+            "Inverter Data"
+        ]
+
+        worksheet.freeze_panes = "B2"
+
+        worksheet.auto_filter.ref = (
+            worksheet.dimensions
+        )
+
+        # Time column width
+        worksheet.column_dimensions[
+            "A"
+        ].width = 22
+
+        # Format timestamp
+        for row in range(
+            2,
+            worksheet.max_row + 1
+        ):
+
+            worksheet.cell(
+                row=row,
+                column=1
+            ).number_format = (
+                "dd/mm/yyyy hh:mm"
+            )
+
+        # Inverter column widths
+        for column in range(
+            2,
+            worksheet.max_column + 1
+        ):
+
+            worksheet.column_dimensions[
+                worksheet.cell(
+                    row=1,
+                    column=column
+                ).column_letter
+            ].width = 14
+
+    output.seek(0)
+
+    # -----------------------------------------------------
+    # DOWNLOAD
+    # -----------------------------------------------------
+
+    safe_measurement = re.sub(
+        r"[^A-Za-z0-9]+",
+        "_",
+        measurement
+    ).strip("_")
+
+    st.download_button(
+        "⬇️ Download Excel",
+        data=output.getvalue(),
+        file_name=(
+            f"Inverter_{safe_measurement}.xlsx"
+        ),
+        mime=(
+            "application/"
+            "vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        type="primary",
+        use_container_width=True
     )
